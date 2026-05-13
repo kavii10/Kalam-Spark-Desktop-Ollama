@@ -1,18 +1,26 @@
-# Kalam Spark - Backend Requirements (Cloud deployment)
+# Kalam Spark - Backend Requirements (Cloud + Local LLM fallback)
 
 # ── Core API
 fastapi==0.111.0
 uvicorn==0.30.1
 pydantic==2.7.4
-httpx==0.27.0
+httpx==0.25.2
+aiohttp==3.9.3
 python-multipart==0.0.9
 
-# ── Web Crawling (for roadmap context)
+# ── Web Crawling (real-time career data for roadmaps)
+# Primary: lightweight httpx + BeautifulSoup (works on Render/cloud)
 beautifulsoup4==4.12.3
+# Optional: crawl4ai for richer JS-rendered site crawling (local use)
+crawl4ai        # Uncomment for local use (requires Playwright + browser)
+# nest_asyncio==1.6.0        # Needed for Windows asyncio compatibility
+
+# ── Local LLM (Ollama / Gemma4 fallback when cloud APIs fail)
+ollama==0.1.7              # Optional: Python client for Ollama local LLM
 
 # ── File Speaker: Document Parsing
-pypdf==4.2.0             # Lightweight PDF extraction
-python-docx==1.1.0       # DOCX extraction
+pypdf==4.2.0               # Lightweight PDF extraction
+python-docx==1.1.0         # DOCX extraction
 
 # ── File Speaker: RAG (Chat with Documents)
 google-generativeai==0.8.3

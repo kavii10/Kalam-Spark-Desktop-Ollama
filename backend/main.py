@@ -40,6 +40,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
+from contextlib import asynccontextmanager
+import subprocess
+
+# ──────────────────────────────────────────────
+# Lifespan Events (Auto-start Ollama)
+# ──────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Try to start Ollama automatically if it's not running
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            await client.get("http://localhost:11434/")
+        print("[System] Ollama is already running on port 11434.")
+    except Exception:
+        print("[System] Ollama not detected. Starting 'ollama serve' in background...")
+        try:
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NO_WINDOW
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
+            )
+            print("[System] Started 'ollama serve' successfully. It will be ready in a moment.")
+        except Exception as e:
+            print(f"[System] Failed to start Ollama automatically: {e}. You may need to run 'ollama serve' manually.")
+    
+    yield
+    # We do not kill Ollama on shutdown, leaving it available for subsequent runs.
 
 # (Imports moved inside functions for Lazy Loading/Fast Startup)
 
@@ -51,6 +83,7 @@ app = FastAPI(
     title="Kalam Spark AI Backend",
     description="Career roadmap generation using Crawl4AI + Cloud Gemma4 (OpenRouter/Groq/Gemini)",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS: read from ALLOWED_ORIGINS env var (comma-separated).
@@ -260,9 +293,9 @@ async def get_tasks(req: TasksRequest):
     from llm_service import generate_tasks
     try:
         tasks = await generate_tasks(req.dream, req.current_stage, req.subjects)
-        # Verify valid structure
-        if not tasks or not isinstance(tasks, list):
-            raise HTTPException(status_code=500, detail="Failed to generate tasks")
+        
+        if not isinstance(tasks, list):
+            tasks = []
         
         # Post-generation filter for non-tech careers
         tech_terms = ["python", "machine learning", "java", "c++", "javascript", "react", "programming", "coding", "software", "developer", "api"]
@@ -282,7 +315,16 @@ async def get_tasks(req: TasksRequest):
         # Ensure we have at least the requested count
         target_count = req.count or 5
         while len(valid_tasks) < target_count:
-            valid_tasks.append({"title": f"Review concepts in {req.subjects[0] if req.subjects else req.dream}", "type": "review"})
+            # Fallback tasks if generation failed or returned too few
+            fallback_titles = [
+                f"Review core concepts in {req.subjects[0] if req.subjects else req.dream}",
+                f"Practice foundational skills for {req.dream}",
+                f"Watch a tutorial on {req.subjects[0] if req.subjects else 'your field'}",
+                "Create a summary of what you've learned so far",
+                "Apply your knowledge to a small practical scenario"
+            ]
+            idx = len(valid_tasks) % len(fallback_titles)
+            valid_tasks.append({"title": fallback_titles[idx], "type": ["review", "hands-on", "theory"][idx % 3]})
         
         return valid_tasks[:target_count]
     except Exception as e:

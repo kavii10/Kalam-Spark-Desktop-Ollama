@@ -5,6 +5,12 @@ Crawls real career sites to get accurate, up-to-date roadmap data.
 
 import asyncio
 import httpx
+try:
+    from crawl4ai import AsyncWebCrawler
+    CRAWL4AI_AVAILABLE = True
+except ImportError:
+    CRAWL4AI_AVAILABLE = False
+
 from bs4 import BeautifulSoup
 from typing import Optional
 
@@ -118,8 +124,8 @@ def get_crawl_urls(dream: str, branch: str) -> list[str]:
     return urls[:3]
 
 
-async def _crawl_single(client: httpx.AsyncClient, url: str, timeout: int = 20) -> str:
-    """Crawl a single URL and return clean text using BeautifulSoup."""
+async def _crawl_single_bs4(client: httpx.AsyncClient, url: str, timeout: int = 20) -> str:
+    """Fallback crawler using BeautifulSoup if crawl4ai is not available."""
     try:
         resp = await client.get(url, timeout=timeout, follow_redirects=True)
         if resp.status_code != 200:
@@ -139,41 +145,75 @@ async def _crawl_single(client: httpx.AsyncClient, url: str, timeout: int = 20) 
         
         return clean_text
     except Exception as e:
-        print(f"[Crawler] Error on {url}: {e}")
+        print(f"[Crawler] Error on {url} (bs4 fallback): {e}")
     return ""
 
 
 async def crawl_career_data(dream: str, branch: str, max_chars_per_source: int = 5000) -> str:
     """
     Crawl multiple career sources for a given dream.
-    Returns combined clean text capped at a usable size for the LLM.
+    Uses crawl4ai if available, otherwise falls back to BeautifulSoup.
     """
     urls = get_crawl_urls(dream, branch)
     print(f"[Crawler] Crawling {len(urls)} sources for '{dream}': {urls}")
 
     collected: list[str] = []
 
-    async with httpx.AsyncClient(
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-        follow_redirects=True
-    ) as client:
-        # Run all crawls concurrently
-        tasks = [_crawl_single(client, url) for url in urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+    if CRAWL4AI_AVAILABLE:
+        print("[Crawler] Using crawl4ai for rich content extraction...")
+        def run_crawl4ai_sync(urls_to_crawl, max_chars):
+            import asyncio
+            import sys
+            # Force ProactorEventLoop for Playwright subprocess compatibility on Windows
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            
+            async def _do_crawl():
+                col = []
+                async with AsyncWebCrawler() as crawler:
+                    for u in urls_to_crawl:
+                        try:
+                            result = await crawler.arun(url=u)
+                            if result and result.markdown:
+                                trimmed = result.markdown[:max_chars]
+                                col.append(f"### Source: {u}\\n\\n{trimmed}")
+                                print(f"[Crawler] Got {len(result.markdown)} chars from {u} via crawl4ai")
+                            else:
+                                print(f"[Crawler] No markdown extracted from {u} via crawl4ai")
+                        except Exception as inner_e:
+                            print(f"[Crawler] crawl4ai error on {u}: {inner_e}")
+                return col
+                
+            return asyncio.run(_do_crawl())
 
-    for url, content in zip(urls, results):
-        if isinstance(content, Exception) or not content:
-            print(f"[Crawler] No content from {url}")
-            continue
-        # Trim each source to avoid overwhelming the LLM context
-        trimmed = content[:max_chars_per_source]
-        collected.append(f"### Source: {url}\n\n{trimmed}")
-        print(f"[Crawler] Got {len(content)} chars from {url}")
+        try:
+            collected = await asyncio.to_thread(run_crawl4ai_sync, urls, max_chars_per_source)
+        except Exception as e:
+            print(f"[Crawler] AsyncWebCrawler failed entirely: {e}. Attempting fallback...")
+    
+    # Fallback to bs4 if crawl4ai wasn't available or failed to collect anything
+    if not collected:
+        if not CRAWL4AI_AVAILABLE:
+            print("[Crawler] crawl4ai not installed. Using BeautifulSoup fallback...")
+        async with httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+            follow_redirects=True
+        ) as client:
+            tasks = [_crawl_single_bs4(client, url) for url in urls]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for url, content in zip(urls, results):
+            if isinstance(content, Exception) or not content:
+                print(f"[Crawler] No content from {url} (bs4)")
+                continue
+            trimmed = content[:max_chars_per_source]
+            collected.append(f"### Source: {url}\\n\\n{trimmed}")
+            print(f"[Crawler] Got {len(content)} chars from {url} (bs4)")
 
     if not collected:
         print("[Crawler] All sources failed — returning empty context")
         return ""
 
-    combined = "\n\n---\n\n".join(collected)
+    combined = "\\n\\n---\\n\\n".join(collected)
     print(f"[Crawler] Total context: {len(combined)} chars from {len(collected)} sources")
     return combined

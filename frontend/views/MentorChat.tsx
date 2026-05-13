@@ -381,7 +381,28 @@ export default function MentorChat({ user, isLight = false }: { user: UserProfil
       const utterance = new SpeechSynthesisUtterance(text.replace(/[*_#`]/g, ''));
       const currentLang = getCurrentLang() || 'en';
       const langMap: Record<string, string> = { 'en': 'en-US', 'ta': 'ta-IN', 'hi': 'hi-IN' };
-      utterance.lang = langMap[currentLang] || 'en-US';
+      
+      let lang = langMap[currentLang] || 'en-US';
+      // Auto-detect text language based on unicode ranges if the text contains native scripts
+      if (/[\u0B80-\u0BFF]/.test(text)) lang = 'ta-IN'; // Tamil
+      else if (/[\u0900-\u097F]/.test(text)) lang = 'hi-IN'; // Hindi/Marathi
+      else if (/[\u0C00-\u0C7F]/.test(text)) lang = 'te-IN'; // Telugu
+      else if (/[\u0C80-\u0CFF]/.test(text)) lang = 'kn-IN'; // Kannada
+      else if (/[\u0D00-\u0D7F]/.test(text)) lang = 'ml-IN'; // Malayalam
+      else if (/[\u0980-\u09FF]/.test(text)) lang = 'bn-IN'; // Bengali
+      
+      utterance.lang = lang;
+      
+      // Explicitly attach the voice object (browsers often ignore the 'lang' string)
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        // Try exact match first (e.g. 'ta-IN'), then broad match (e.g. 'ta')
+        let voice = voices.find(v => v.lang === lang) || voices.find(v => v.lang.startsWith(lang.split('-')[0]));
+        if (voice) {
+          utterance.voice = voice;
+        }
+      }
+
       utterance.onend = () => setSpeakingIdx(null);
       window.speechSynthesis.speak(utterance);
       setSpeakingIdx(idx);
@@ -623,7 +644,7 @@ export default function MentorChat({ user, isLight = false }: { user: UserProfil
                   }`}
                   dangerouslySetInnerHTML={{ __html: renderMd(msg.text) }}
                 />
-                <div className={`flex items-center gap-1 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`flex items-center gap-1 mt-1 opacity-70 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <button onClick={() => handleCopyMsg(msg.text)} title="Copy" className="p-1 text-zinc-500 hover:text-violet-400">
                     <Copy size={11} />
                   </button>
@@ -694,7 +715,7 @@ export default function MentorChat({ user, isLight = false }: { user: UserProfil
                 <button onClick={() => setAttachment(null)} className="text-red-400 hover:text-red-300 ml-2"><X size={14} /></button>
               </div>
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex items-end gap-2">
               <input
                 type="file"
                 ref={fileInputRef}
@@ -702,40 +723,66 @@ export default function MentorChat({ user, isLight = false }: { user: UserProfil
                 className="hidden"
                 accept={ACCEPTED_FILES}
               />
-              <button 
-                onClick={() => fileInputRef.current?.click()} 
-                className="p-2 rounded-xl text-zinc-500 hover:text-violet-400 hover:bg-violet-500/10 transition-all"
-              >
-                <Paperclip size={20} />
-              </button>
-              <button 
-                onClick={handleVoiceInput}
-                className={`p-2 rounded-xl transition-all ${isListening ? 'bg-red-500/20 text-red-400 animate-pulse' : 'text-zinc-500 hover:text-violet-400 hover:bg-violet-500/10'}`}
-              >
-                <Mic size={20} />
-              </button>
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                placeholder="Message your mentor..."
-                rows={1}
-                className={`flex-1 min-w-0 rounded-2xl px-5 py-3.5 text-sm focus:outline-none transition-all resize-none no-scrollbar ${isLight ? 'bg-white border border-zinc-200 text-zinc-800 focus:border-violet-400' : 'bg-zinc-800/60 border border-zinc-700/50 text-white focus:border-violet-500/50'}`}
-              />
+              
+              {/* Unified Input Box Wrapper */}
+              <div className={`flex-1 flex items-center min-w-0 rounded-2xl border transition-all ${
+                isLight 
+                  ? 'bg-white border-zinc-200 focus-within:border-violet-400 shadow-sm' 
+                  : 'bg-zinc-800/60 border-zinc-700/50 focus-within:border-violet-500/50'
+              }`}>
+                
+                {/* Left Action Buttons */}
+                <div className="flex items-center gap-1 pl-2">
+                  <button 
+                    onClick={() => fileInputRef.current?.click()} 
+                    className="p-2 rounded-xl text-zinc-500 hover:text-violet-400 hover:bg-violet-500/10 transition-all shrink-0"
+                    title="Attach file"
+                  >
+                    <Paperclip size={18} />
+                  </button>
+                  <button 
+                    onClick={handleVoiceInput}
+                    className={`p-2 rounded-xl transition-all shrink-0 ${
+                      isListening 
+                        ? 'bg-red-500/20 text-red-400 animate-pulse' 
+                        : 'text-zinc-500 hover:text-violet-400 hover:bg-violet-500/10'
+                    }`}
+                    title="Voice input"
+                  >
+                    <Mic size={18} />
+                  </button>
+                </div>
+
+                {/* Text Area */}
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSend();
+                    }
+                  }}
+                  placeholder="Message your mentor..."
+                  rows={1}
+                  className="flex-1 bg-transparent px-3 py-3.5 text-sm focus:outline-none resize-none no-scrollbar min-w-0"
+                  style={{ color: isLight ? '#1f2937' : '#ffffff', minHeight: '48px', maxHeight: '150px' }}
+                />
+              </div>
+
+              {/* Send Button */}
               <button
                 onClick={handleSend}
                 disabled={(!input.trim() && !attachment) || isTyping}
-                className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all ${
-                  (input.trim() || attachment) && !isTyping ? 'bg-violet-600 text-white shadow-lg shadow-violet-900/40' : 'bg-zinc-800 text-zinc-600'
+                className={`w-[48px] h-[48px] shrink-0 rounded-2xl flex items-center justify-center transition-all ${
+                  (input.trim() || attachment) && !isTyping 
+                    ? 'bg-violet-600 text-white shadow-lg shadow-violet-900/40 hover:bg-violet-500 hover:scale-[1.02] active:scale-95' 
+                    : 'bg-zinc-800 text-zinc-600'
                 }`}
+                title="Send message"
               >
-                {isTyping ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+                {isTyping ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} className={(input.trim() || attachment) && !isTyping ? "ml-0.5" : ""} />}
               </button>
             </div>
           </div>

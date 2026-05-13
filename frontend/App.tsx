@@ -41,8 +41,10 @@ import RevisionEngine from "./views/RevisionEngine";
 import CareerPivot from "./views/CareerPivot";
 import Opportunities from "./views/Opportunities";
 import FileSpeaker from "./views/FileSpeaker";
+import LoginScreen from "./views/LoginScreen";
 import { UserProfile, Reward } from "./types";
 import { dbService } from "./dbService";
+import { supabase } from "./supabaseClient";
 import { getCurrentLang, type LangCode } from "./i18n";
 import { rewardEvents } from "./rewardService";
 
@@ -785,10 +787,11 @@ const SidebarItem = ({
 
 /* ── Main App Content ── */
 const AppContent = ({
-  user, setUser,
+  user, setUser, setShowSplash,
 }: {
   user: UserProfile;
   setUser: React.Dispatch<React.SetStateAction<UserProfile>>;
+  setShowSplash: React.Dispatch<React.SetStateAction<boolean>>;
 }) => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -799,28 +802,28 @@ const AppContent = ({
     }
   }, [location, user.isAuthenticated, user.onboardingComplete]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [showSplash, setShowSplash] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   useEffect(() => {
-    document.body.style.overflow = showSplash || isSidebarOpen ? "hidden" : "auto";
-  }, [showSplash, isSidebarOpen]);
-
-
+    document.body.style.overflow = isSidebarOpen ? "hidden" : "auto";
+  }, [isSidebarOpen]);
 
   const isLight = user.settings?.theme === 'light';
-  if (showSplash) return <SplashScreen onComplete={() => setShowSplash(false)} isLight={isLight} />;
   if (!user.onboardingComplete) {
     return (
       <Onboarding
         isLight={isLight}
-        onComplete={(profile) => {
+        onComplete={async (profile) => {
           const avatar = `https://api.dicebear.com/7.x/shapes/svg?seed=${encodeURIComponent(profile.name || 'user')}`;
           const updated = { ...user, ...profile, avatar, onboardingComplete: true, currentStageIndex: 0 };
-          setUser(updated);
-          localStorage.setItem('kalamspark_user_session', JSON.stringify(updated));
-          dbService.saveUser(updated);
           navigate("/roadmap");
+          setUser(updated);
+          try {
+            await dbService.saveUser(updated);
+          } catch (err) {
+            console.error('[Onboarding] Save failed — will retry on next load:', err);
+            // Don't block the user. The debounced save effect will retry shortly.
+          }
         }}
       />
     );
@@ -1122,17 +1125,17 @@ const AppContent = ({
             <button
               onClick={async () => {
                 setShowSettingsModal(false);
-                await dbService.clearSession();
-                // Reset user state to trigger onboarding immediately
-                setUser({ 
-                  id: 'usr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6),
-                  isAuthenticated: true, 
-                  onboardingComplete: false, 
-                  currentStageIndex: 0, 
-                  xp: 0, 
-                  streak: 0,
-                  settings: user.settings
-                } as any);
+                // Show splash first for a smooth transition experience
+                setShowSplash(true);
+                // Brief delay so splash is visible, then clear session
+                setTimeout(async () => {
+                  await dbService.clearSession();
+                  // Force state reset in case onAuthStateChange doesn't fire (e.g. manual login)
+                  setUser(prev => ({ ...prev, isAuthenticated: false }));
+                  setSessionLoading(false);
+                  // Reload the page to wipe any residual React memory states completely
+                  window.location.reload();
+                }, 1000);
               }}
               className="w-full py-3 text-sm font-semibold text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-all rounded-xl flex items-center justify-center gap-2"
               style={{ border: "1px solid rgba(239,68,68,0.2)" }}
@@ -1147,21 +1150,14 @@ const AppContent = ({
 };
 
 export default function App() {
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [showSplash, setShowSplash] = useState(true);
   const [user, setUser] = useState<UserProfile>(() => {
-    const saved = localStorage.getItem("kalamspark_user_session");
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const systemTheme = prefersDark ? 'dark' : 'light';
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // If user hasn't manually set a theme, update it to match current system preference
-      if (!parsed?.settings?.hasManualTheme) {
-        parsed.settings = { ...(parsed.settings || {}), theme: systemTheme, autoScheduleRevisions: true, notificationsEnabled: true, soundEnabled: true };
-      }
-      return parsed;
-    }
     return {
-      id: 'usr_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 6),
-      isAuthenticated: true,
+      id: '', // Will be set by Supabase
+      isAuthenticated: false,
       onboardingComplete: false,
       currentStageIndex: 0,
       xp: 0,
@@ -1170,6 +1166,138 @@ export default function App() {
       settings: { theme: systemTheme, autoScheduleRevisions: true, notificationsEnabled: true, soundEnabled: true },
     };
   });
+
+  // Tracks which user's profile has already been loaded from Supabase this session.
+  // Stores the user ID string when loaded, null when not. Used to prevent the
+  // onAuthStateChange duplicate call from overwriting a successfully-loaded profile.
+  const profileLoadedRef = React.useRef<string | null>(null);
+
+  // ── Supabase Auth Listener ──
+  useEffect(() => {
+    const handleSession = async (session: any, isInitial: boolean) => {
+      // ── ALWAYS handle sign-out (null session) regardless of any guard ──
+      // This must run first before any other check, so logout always works.
+      if (!session) {
+        // --- Zero-Verification Manual Session Check ---
+        const manualEmail = localStorage.getItem("kalamspark_manual_email");
+        if (manualEmail) {
+          try {
+            const dbUser = await dbService.getUserByEmail(manualEmail);
+            if (dbUser) {
+              profileLoadedRef.current = dbUser.id;
+              setUser({ ...dbUser, isAuthenticated: true });
+              setSessionLoading(false);
+              return;
+            } else {
+              // Email in localstorage but not in DB (deleted?) -> clear it.
+              localStorage.removeItem("kalamspark_manual_email");
+            }
+          } catch (err) {
+            console.error("[App] Manual session fetch failed", err);
+          }
+        }
+        // --- End Check ---
+
+        profileLoadedRef.current = null;
+        setUser(prev => ({ ...prev, isAuthenticated: false, onboardingComplete: false }));
+        setSessionLoading(false);
+        return;
+      }
+
+      // For non-initial calls (onAuthStateChange duplicates): skip if we already
+      // have this exact user's profile loaded, to prevent race conditions.
+      if (!isInitial && profileLoadedRef.current === session.user.id) {
+        setSessionLoading(false);
+        return;
+      }
+
+      try {
+        // 1. Try to find user by their email first. This is crucial for fixing the bug where 
+        // using Google Auth with the same email creates a new user and resets onboarding.
+        let dbUser = null;
+        if (session.user.email) {
+          dbUser = await dbService.getUserByEmail(session.user.email);
+        }
+        // 2. Fallback to ID lookup if no email exists
+        if (!dbUser) {
+          dbUser = await dbService.getUser(session.user.id);
+        }
+
+        if (dbUser) {
+          // Existing user — restore full profile from Supabase
+          profileLoadedRef.current = session.user.id;
+          
+          // IMPORTANT: If they logged in via a different provider (e.g. Google vs Magic Link), 
+          // Supabase Auth might have given them a new ID, but we found their old profile via email.
+          // We MUST keep the old ID in the app state so that foreign keys (roadmaps, tasks, etc.)
+          // remain perfectly connected to this user. Since our RLS allows public access, 
+          // a mismatch between session.user.id and dbUser.id is completely fine.
+          if (dbUser.id !== session.user.id) {
+             console.log('[App] Auth ID changed for existing email. Preserving original DB identity to maintain data access...');
+          }
+          
+          setUser(dbUser);
+        } else {
+          // Truly a NEW user — no row in DB yet. Build a clean initial record.
+          const name = session.user.user_metadata?.name || session.user.user_metadata?.full_name || '';
+          const newUser: UserProfile = {
+            id: session.user.id,
+            email: session.user.email,
+            name: name,
+            branch: '',
+            year: '',
+            educationLevel: '',
+            dream: '',
+            currentStageIndex: 0,
+            isAuthenticated: true,
+            onboardingComplete: false,
+            xp: 0,
+            streak: 0,
+            rewards: [],
+            settings: {
+              theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+              autoScheduleRevisions: true,
+              notificationsEnabled: true,
+              soundEnabled: true,
+            },
+          };
+          profileLoadedRef.current = session.user.id;
+          setUser(newUser);
+          await dbService.saveUser(newUser);
+        }
+      } catch (err) {
+        // DB fetch or save failed — do NOT overwrite a successfully-loaded profile.
+        console.error('[App] handleSession: DB error — preserving existing state.', err);
+        if (!profileLoadedRef.current) {
+          setUser(prev => ({
+            ...prev,
+            id: session.user.id,
+            email: prev.email || session.user.email,
+            isAuthenticated: true,
+          }));
+        }
+      }
+
+      setSessionLoading(false);
+    };
+
+    // isInitial=true: fired by getSession() on app start / page reload
+    // isInitial=false: fired by onAuthStateChange (login, logout, token refresh)
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      handleSession(session, true);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      // Show loading spinner for genuine state changes (login/logout),
+      // but NOT for the duplicate INITIAL_SESSION event on every page load.
+      if (!profileLoadedRef.current) {
+        setSessionLoading(true);
+      }
+      handleSession(session, false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
 
   // ── Wake Up Backend (Prevents Render Free Tier Cold Start) ──
   useEffect(() => {
@@ -1205,11 +1333,8 @@ export default function App() {
       setUser(prev => {
         // Only auto-follow system if user hasn't manually set a theme
         if (prev.settings?.hasManualTheme) return prev;
-        
         const newTheme = e.matches ? 'dark' : 'light';
-        const updatedUser = { ...prev, settings: { ...prev.settings, theme: newTheme } as any };
-        localStorage.setItem("kalamspark_user_session", JSON.stringify(updatedUser));
-        return updatedUser;
+        return { ...prev, settings: { ...prev.settings, theme: newTheme } as any };
       });
     };
     mq.addEventListener('change', handler);
@@ -1222,10 +1347,12 @@ export default function App() {
     if (!user.isAuthenticated || !user.id) return;
     // Debounce saves to avoid hammering Supabase on rapid state changes
     const timer = setTimeout(() => {
-      dbService.saveUser(user);
+      dbService.saveUser(user).catch(err =>
+        console.warn('[App] Background save failed (will retry on next change):', err)
+      );
     }, 800);
     return () => clearTimeout(timer);
-  }, [user.id, user.xp, user.streak, user.currentStageIndex, user.settings, user.dream, user.avatar]);
+  }, [user.id, user.xp, user.streak, user.currentStageIndex, user.onboardingComplete, user.settings, user.dream, user.avatar]);
 
   // ── Streak Logic — Auto-increment streak on daily login ───────────────────
   useEffect(() => {
@@ -1249,12 +1376,83 @@ export default function App() {
     }
   }, [user.isAuthenticated, user.id]);
 
+  if (showSplash) {
+    return (
+      <>
+        {user.settings?.theme === 'light' && <style>{LIGHT_THEME_CSS}</style>}
+        <SplashScreen onComplete={() => setShowSplash(false)} isLight={user.settings?.theme === 'light'} />
+      </>
+    );
+  }
+
+  if (sessionLoading) {
+    return <div className="fixed inset-0 bg-black flex items-center justify-center"><div className="w-8 h-8 border-4 border-gold-500 border-t-transparent rounded-full animate-spin" /></div>;
+  }
+
+  // ── Manual Zero-Verification Login ──
+  const handleManualLogin = async (email: string, name: string) => {
+    setSessionLoading(true);
+    try {
+      const cleanEmail = email.trim().toLowerCase();
+      const cleanName = name.trim() || cleanEmail.split('@')[0];
+      
+      let dbUser = await dbService.getUserByEmail(cleanEmail);
+      
+      if (dbUser) {
+        // Log in as existing user
+        profileLoadedRef.current = dbUser.id;
+        setUser({ ...dbUser, isAuthenticated: true });
+        localStorage.setItem("kalamspark_manual_email", cleanEmail);
+      } else {
+        // Create new user instantly
+        const newId = `manual_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const newUser: UserProfile = {
+          id: newId,
+          email: cleanEmail,
+          name: cleanName,
+          branch: '',
+          year: '',
+          educationLevel: '',
+          dream: '',
+          currentStageIndex: 0,
+          isAuthenticated: true,
+          onboardingComplete: false,
+          xp: 0,
+          streak: 0,
+          rewards: [],
+          settings: {
+            theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+            autoScheduleRevisions: true,
+            notificationsEnabled: true,
+            soundEnabled: true,
+          },
+        };
+        profileLoadedRef.current = newId;
+        setUser(newUser);
+        await dbService.saveUser(newUser);
+        localStorage.setItem("kalamspark_manual_email", cleanEmail);
+      }
+    } catch (err) {
+      console.error("[App] Manual login failed", err);
+    }
+    setSessionLoading(false);
+  };
+
+  if (!user.isAuthenticated) {
+    return (
+      <>
+        {user.settings?.theme === 'light' && <style>{LIGHT_THEME_CSS}</style>}
+        <LoginScreen isLight={user.settings?.theme === 'light'} onManualLogin={handleManualLogin} />
+      </>
+    );
+  }
+
   return (
     <>
       {/* Inject light theme globally so splash + login pages are also styled */}
       {user.settings?.theme === 'light' && <style>{LIGHT_THEME_CSS}</style>}
       <Router>
-        <AppContent user={user} setUser={setUser} />
+        <AppContent user={user} setUser={setUser} setShowSplash={setShowSplash} />
       </Router>
     </>
   );

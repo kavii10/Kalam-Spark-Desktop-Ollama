@@ -2,13 +2,51 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Loader2, CheckCircle2, BookOpen, Code, Star, Lock,
-  ChevronDown, ChevronUp, X, Zap, Trophy, Flame, ArrowRight
+  ChevronDown, ChevronUp, X, Zap, Trophy, Flame, ArrowRight, AlertTriangle
 } from 'lucide-react';
 import { UserProfile, CareerRoadmap } from '../types';
 import { generateRoadmap } from '../geminiService';
 import { dbService } from '../dbService';
 import CareerPivot from './CareerPivot';
 import { grantReward, makeStageCompleteReward } from '../rewardService';
+
+/* ── In-App Toast Banner (replaces browser alert) ── */
+function ToastBanner({ message, onClose }: { message: string; onClose: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 3000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed top-20 left-1/2 z-[9000] flex items-center gap-3 px-5 py-3.5 rounded-2xl shadow-2xl"
+      style={{
+        transform: 'translateX(-50%)',
+        background: 'linear-gradient(135deg, rgba(30,15,60,0.97), rgba(15,7,30,0.97))',
+        border: '1px solid rgba(239,68,68,0.45)',
+        boxShadow: '0 8px 40px rgba(239,68,68,0.2), 0 2px 8px rgba(0,0,0,0.5)',
+        animation: 'toastIn 0.35s cubic-bezier(0.34,1.56,0.64,1) both',
+        maxWidth: '90vw',
+      }}
+    >
+      <div
+        className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
+        style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)' }}
+      >
+        <Lock size={14} className="text-red-400" />
+      </div>
+      <span className="text-sm font-semibold text-red-200">{message}</span>
+      <button onClick={onClose} className="ml-2 text-red-400/60 hover:text-red-300 transition-colors">
+        <X size={14} />
+      </button>
+      <style>{`
+        @keyframes toastIn {
+          from { opacity: 0; transform: translateX(-50%) translateY(-12px) scale(0.92); }
+          to   { opacity: 1; transform: translateX(-50%) translateY(0)       scale(1); }
+        }
+      `}</style>
+    </div>
+  );
+}
 
 
 /* ── Fix cached template-literal bugs like "Applied $(profile.branch)" ── */
@@ -427,8 +465,8 @@ export default function RoadmapView({
   onStageAdvance?: (newIndex: number) => void;
 }) {
   const [roadmap, setRoadmap] = useState<CareerRoadmap | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadingMsg, setLoadingMsg] = useState('Initializing connection...');
+  const [loading, setLoading] = useState(false);
+  const [loadingMsg, setLoadingMsg] = useState('');
   const [completedStages, setCompletedStages] = useState<string[]>([]);
   const [activeStageIndex, setActiveStageIndex] = useState(user.currentStageIndex);
   const [selectedStage, setSelectedStage] = useState<any | null>(null);
@@ -436,6 +474,8 @@ export default function RoadmapView({
   const [showPivotModal, setShowPivotModal] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [toast, setToast] = useState<string | null>(null);
+  const showToast = (msg: string) => setToast(msg);
   const [conceptProgress, setConceptProgress] = useState<Record<string, string[]>>(() => {
     const saved = localStorage.getItem('kalamspark_concept_progress');
     return saved ? JSON.parse(saved) : {};
@@ -454,7 +494,7 @@ export default function RoadmapView({
         const forceRefresh = localStorage.getItem("kalamspark_force_refresh") === "true";
         const existing = await dbService.getRoadmap(user.id);
         
-        if (!forceRefresh && existing && existing.stages && existing.stages.length > 0 && existing.dream?.toLowerCase() === user.dream.trim().toLowerCase()) {
+        if (!forceRefresh && existing && existing.stages && existing.stages.length === 4 && existing.dream?.toLowerCase() === user.dream.trim().toLowerCase()) {
           const clean = sanitizeRoadmap(existing, user.dream, user.branch);
           setRoadmap(clean);
           await dbService.saveRoadmap(user, clean);
@@ -549,7 +589,7 @@ export default function RoadmapView({
 
     // Enforce sequential completion
     if (stageIndex > completedStages.length) {
-      alert("Please complete the previous stages first!");
+      showToast("Please complete the previous stages first!");
       return;
     }
 
@@ -584,7 +624,7 @@ export default function RoadmapView({
 
   const toggleConcept = (stageId: string, stageIndex: number, concept: string, totalConcepts: number) => {
     if (stageIndex > completedStages.length) {
-      alert("Please complete the previous stages first!");
+      showToast("Please complete the previous stages first!");
       return;
     }
 
@@ -648,6 +688,8 @@ export default function RoadmapView({
 
   return (
     <>
+      {/* In-App Toast */}
+      {toast && <ToastBanner message={toast} onClose={() => setToast(null)} />}
       {/* Career Pivot Modal - Rendered outside the fade-up div to prevent fixed positioning bugs */}
       {showPivotModal && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center p-4 sm:p-6 bg-black/70 backdrop-blur-md overflow-y-auto" onClick={() => setShowPivotModal(false)}>
@@ -811,7 +853,7 @@ export default function RoadmapView({
                                     if (!isCompleted && canCheck) {
                                       toggleConcept(stage.id, idx, sub, totalConcepts);
                                     } else if (!canCheck) {
-                                      alert("Please complete the previous stages first!");
+                                      showToast("Please complete the previous stages first!");
                                     }
                                   }}
                                   className={`roadmap-stage-topic-item flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs transition-all ${

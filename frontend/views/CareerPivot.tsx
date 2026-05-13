@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { UserProfile } from "../types";
 import {
   ArrowRight, BrainCircuit, Target, RefreshCw,
-  Briefcase, ChevronRight, ShieldCheck, Zap, AlertCircle, CheckCircle2, Info
+  Briefcase, ChevronRight, ShieldCheck, Zap, AlertCircle, CheckCircle2, Info, AlertTriangle, X
 } from "lucide-react";
 import { dbService } from "../dbService";
 
@@ -18,6 +18,77 @@ interface PivotResult {
   marketDemand: string;
   timeToTransition: string;
   bridgePlan: { title: string; action: string }[];
+}
+
+/* ── In-App Confirmation Modal ── */
+function ConfirmModal({
+  title, message, confirmLabel, onConfirm, onCancel
+}: {
+  title: string;
+  message: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)' }}
+    >
+      <div
+        className="w-full max-w-sm rounded-2xl p-7 flex flex-col gap-5 relative"
+        style={{
+          background: 'linear-gradient(135deg, rgba(15,8,35,0.98) 0%, rgba(25,12,50,0.98) 100%)',
+          border: '1px solid rgba(139,92,246,0.4)',
+          boxShadow: '0 0 60px rgba(139,92,246,0.2), 0 24px 60px rgba(0,0,0,0.6)',
+          animation: 'confirmIn 0.3s cubic-bezier(0.34,1.56,0.64,1) both',
+        }}
+      >
+        {/* Icon */}
+        <div className="flex items-center justify-center">
+          <div
+            className="w-14 h-14 rounded-2xl flex items-center justify-center"
+            style={{ background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)' }}
+          >
+            <AlertTriangle size={26} className="text-amber-400" />
+          </div>
+        </div>
+        {/* Text */}
+        <div className="text-center">
+          <h3 className="font-cinzel text-lg font-bold text-gold-100 mb-2">{title}</h3>
+          <p className="text-sm text-gold-300/60 leading-relaxed">{message}</p>
+        </div>
+        {/* Buttons */}
+        <div className="flex gap-3">
+          <button
+            onClick={onCancel}
+            className="flex-1 py-2.5 rounded-xl text-sm font-semibold transition-all"
+            style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#9ca3af' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all"
+            style={{
+              background: 'linear-gradient(135deg, #7c3aed, #9333ea)',
+              border: '1px solid rgba(139,92,246,0.5)',
+              color: '#fff',
+              boxShadow: '0 4px 20px rgba(124,58,237,0.4)',
+            }}
+          >
+            {confirmLabel || 'Confirm'}
+          </button>
+        </div>
+        <style>{`
+          @keyframes confirmIn {
+            from { opacity: 0; transform: scale(0.88) translateY(16px); }
+            to   { opacity: 1; transform: scale(1)    translateY(0); }
+          }
+        `}</style>
+      </div>
+    </div>
+  );
 }
 
 const getBackendUrl = () => {
@@ -36,6 +107,7 @@ export default function CareerPivot({ user, setUser }: Props) {
   const [result, setResult] = useState<PivotResult | null>(null);
   const [error, setError] = useState("");
   const [pivotSuccess, setPivotSuccess] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const handleAnalyze = async () => {
     if (!newDream.trim()) return;
@@ -82,8 +154,7 @@ export default function CareerPivot({ user, setUser }: Props) {
   };
 
   const applyPivot = async () => {
-    if (!window.confirm(`Change your career goal to "${newDream}"?\n\nThis will clear your current roadmap and generate a new one.`)) return;
-
+    setShowConfirm(false);
     try {
       localStorage.removeItem("kalamspark_roadmap_data");
       localStorage.setItem("kalamspark_force_refresh", "true");
@@ -117,6 +188,16 @@ export default function CareerPivot({ user, setUser }: Props) {
 
   return (
     <div className="max-w-4xl mx-auto w-full space-y-8 animate-in fade-in duration-500 pb-20">
+      {/* In-App Confirm Modal */}
+      {showConfirm && (
+        <ConfirmModal
+          title="Commit to Career Pivot?"
+          message={`Change your career goal to "${newDream}"? This will clear your current roadmap and generate a new one.`}
+          confirmLabel="Yes, Commit!"
+          onConfirm={applyPivot}
+          onCancel={() => setShowConfirm(false)}
+        />
+      )}
       {/* Header */}
       <div className="glass-card p-8 relative overflow-hidden flex flex-col items-center text-center">
         <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-gold-500 via-orange-400 to-purple-500" />
@@ -262,7 +343,7 @@ export default function CareerPivot({ user, setUser }: Props) {
             {/* Commit Button */}
             <div className="mt-10 flex justify-center border-t border-purple-500/20 pt-8">
               <button
-                onClick={applyPivot}
+                onClick={() => setShowConfirm(true)}
                 className="btn-primary py-4 px-12 text-sm uppercase tracking-widest flex items-center gap-3 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 transition-all shadow-[0_0_30px_rgba(124,58,237,0.4)]"
               >
                 <CheckCircle2 size={18} /> Commit to Pivot — Become {newDream} <ChevronRight size={18} />

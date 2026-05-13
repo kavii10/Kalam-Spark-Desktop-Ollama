@@ -549,48 +549,27 @@ export default function Resources({ user }: { user: UserProfile }) {
 
       let cached = rm.cachedResources;
 
-      // ── Cache invalidation logic ─────────────────────────────────────────────
-      // Re-fetch if:
-      //   1. No cache exists at all
-      //   2. Cache has no books or papers arrays
-      //   3. The dream has changed (career pivot)
-      //   4. The cache was built for a different stage
-      //   5. All resource arrays are empty (fetch silently failed last time)
+      // ── Cache Logic ──────────────────────────────────────────────────────────
+      // Re-fetch ONLY if:
+      //   1. No cache exists
+      //   2. The user has pivoted careers (dream mismatch)
+      //   3. The user has moved to a new stage in the roadmap
       const dreamMismatch = cached?.cachedForDream && cached.cachedForDream !== currentUser.dream;
       const stageMismatch = cached?.cachedForStage !== undefined && cached.cachedForStage !== stageIdx;
-      const allEmpty =
-        cached &&
-        (cached.books?.length ?? 0) === 0 &&
-        (cached.videos?.length ?? 0) === 0 &&
-        (cached.papers?.length ?? 0) === 0 &&
-        (cached.news?.length ?? 0) === 0;
 
-      const noCached =
-        !cached ||
-        !Array.isArray(cached.books) ||
-        !Array.isArray(cached.papers) ||
-        dreamMismatch ||
-        stageMismatch ||
-        allEmpty;
-
-      if (noCached) {
+      if (!cached || dreamMismatch || stageMismatch) {
         const fetched = await fetchDirectResources(
           currentUser.dream, stage.title, stage.subjects || [], currentUser.year
         );
-        const safeBooks  = Array.isArray(fetched.books)  ? fetched.books  : [];
-        const safeVideos = Array.isArray(fetched.videos) ? fetched.videos : [];
-        const safePapers = Array.isArray(fetched.papers) ? fetched.papers : [];
-        const safeNews   = Array.isArray(fetched.news)   ? fetched.news   : [];
-
         cached = {
-          books:  safeBooks.filter((b: any) => b && typeof b.link === 'string' && b.link.startsWith('http')),
-          videos: safeVideos.filter((v: any) => v && typeof v.link === 'string' && v.link.startsWith('http')),
-          papers: safePapers.filter((p: any) => p && typeof p.link === 'string' && p.link.startsWith('http')),
-          news:   safeNews.filter((n: any) => n && typeof n.link === 'string' && n.link.startsWith('http')),
+          books:  (Array.isArray(fetched.books)  ? fetched.books  : []).filter((b: any) => b?.link?.startsWith('http')).slice(0, 10),
+          videos: (Array.isArray(fetched.videos) ? fetched.videos : []).filter((v: any) => v?.link?.startsWith('http')).slice(0, 10),
+          papers: (Array.isArray(fetched.papers) ? fetched.papers : []).filter((p: any) => p?.link?.startsWith('http')).slice(0, 10),
+          news:   (Array.isArray(fetched.news)   ? fetched.news   : []).filter((n: any) => n?.link?.startsWith('http')).slice(0, 10),
           cachedForDream: currentUser.dream,
           cachedForStage: stageIdx,
         } as any;
-        rm = { ...rm, cachedResources: cached, resourceOffset: 0 };
+        rm = { ...rm, cachedResources: cached, _loadMoreCount: 0 };
         await dbService.saveRoadmap(currentUser, rm);
       }
 
@@ -611,20 +590,11 @@ export default function Resources({ user }: { user: UserProfile }) {
     return () => { active = false; };
   }, [fetchCurriculum]);
 
-  // ── Pagination/Slicing logic deleted: We now load all resources into the horizontal scroll ──
-
-  // ── Load next batch ──────────────────────────────────────────────────────────
+  // ── Load next batch — REPLACES current data with fresh resources ─────────────
   const loadNextBatch = useCallback(async () => {
     if (!roadmap || !Array.isArray(roadmap.stages) || roadmap.stages.length === 0) return;
     setLoading(true);
     const currentUser = userRef.current;
-    const cached = roadmap.cachedResources;
-    const currentMax = Math.max(
-      cached?.books?.length  || 0,
-      cached?.videos?.length || 0,
-      cached?.papers?.length || 0,
-      cached?.news?.length   || 0,
-    );
 
     const stageIdx = Math.min(currentUser.currentStageIndex ?? 0, roadmap.stages.length - 1);
     const stage = roadmap.stages[stageIdx];
@@ -632,27 +602,33 @@ export default function Resources({ user }: { user: UserProfile }) {
       setLoading(false);
       return;
     }
-    // Next page offset calculation. 15 is our provider max constraint.
-    const page = Math.floor(currentMax / 15) + 1;
+
+    // Rotate through subjects + skills so each click gets fresh unique content
+    const subjects = stage.subjects?.length ? stage.subjects : [stage.title];
+    const skills   = stage.skills?.length   ? stage.skills   : [];
+    const allTerms = [...subjects, ...skills, currentUser.dream].filter(Boolean);
+    const loadCount = (roadmap as any)._loadMoreCount || 0;
+    const rotatedTerm = allTerms[loadCount % allTerms.length];
 
     try {
       const fetched = await fetchDirectResources(
-        currentUser.dream, stage.title, stage.subjects || [], currentUser.year, page
+        currentUser.dream, rotatedTerm, [rotatedTerm], currentUser.year, 0
       );
 
-      // Build new cache immutably – never mutate roadmap state directly
-      const newCached = {
-        ...cached,
-        books:  [...(cached?.books  || []), ...fetched.books.filter((b: any)  => b.link?.startsWith('http'))],
-        videos: [...(cached?.videos || []), ...fetched.videos.filter((v: any) => v.link?.startsWith('http'))],
-        papers: [...(cached?.papers || []), ...fetched.papers.filter((p: any) => p.link?.startsWith('http'))],
-        news:   [...(cached?.news   || []), ...fetched.news.filter((n: any)   => n.link?.startsWith('http'))],
+      // REPLACE (not append) — show fresh unique set of 10 per category
+      const freshData = {
+        books:  fetched.books.filter((b: any)  => b.link?.startsWith('http')).slice(0, 10),
+        videos: fetched.videos.filter((v: any) => v.link?.startsWith('http')).slice(0, 10),
+        papers: fetched.papers.filter((p: any) => p.link?.startsWith('http')).slice(0, 10),
+        news:   fetched.news.filter((n: any)   => n.link?.startsWith('http')).slice(0, 10),
+        cachedForDream: currentUser.dream,
+        cachedForStage: stageIdx,
       };
 
-      const updatedRm = { ...roadmap, cachedResources: newCached };
+      const updatedRm = { ...roadmap, cachedResources: freshData as any, _loadMoreCount: loadCount + 1 };
       await dbService.saveRoadmap(currentUser, updatedRm);
       setRoadmap(updatedRm);
-      setData(newCached as ResourceData);
+      setData(freshData as ResourceData);
     } catch (e) {
       console.error('loadNextBatch error:', e);
     } finally {

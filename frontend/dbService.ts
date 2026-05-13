@@ -24,6 +24,13 @@ const STORAGE_KEYS = {
 
 // ─── Row → UserProfile mapper ────────────────────────────────────────────────
 function mapRow(data: any): UserProfile {
+  // Default settings (fallback for rows written before settings column existed)
+  const defaultSettings = {
+    theme: 'dark' as const,
+    autoScheduleRevisions: true,
+    notificationsEnabled: true,
+    soundEnabled: true,
+  };
   return {
     id: data.id,
     name: data.name,
@@ -46,6 +53,7 @@ function mapRow(data: any): UserProfile {
     xp: data.xp ?? 0,
     streak: data.streak ?? 0,
     rewards: data.rewards ?? [],
+    settings: data.settings ? { ...defaultSettings, ...data.settings } : defaultSettings,
     fileSpeakerData: data.file_speaker_data || {
       sources: [],
       activeId: null,
@@ -59,50 +67,88 @@ export const dbService = {
 
   // --- USER PROFILE ---
   async saveUser(user: UserProfile): Promise<void> {
-    localStorage.setItem(
-      STORAGE_KEYS.USER,
-      JSON.stringify({ ...user, lastSync: new Date().toISOString() }),
-    );
+    // ── Tier 1: Full save (requires migrate_v2.sql to have been run) ──────────
+    const fullPayload: Record<string, any> = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      avatar: user.avatar,
+      branch: user.branch,
+      year: user.year,
+      dream: user.dream,
+      current_stage_index: user.currentStageIndex,
+      onboarding_complete: user.onboardingComplete,
+      xp: user.xp,
+      streak: user.streak,
+      last_sync: new Date().toISOString(),
+      // Extra columns added by migrate_v2.sql:
+      education_level: user.educationLevel || '',
+      school_board: user.schoolBoard || '',
+      grade_or_semester: user.gradeOrSemester || '',
+      college_name: user.collegeName || '',
+      study_hours_per_day: user.studyHoursPerDay ?? null,
+      target_year: user.targetYear || '',
+      city: user.city || '',
+      motivation: user.motivation || '',
+      rewards: user.rewards ?? [],
+      file_speaker_data: user.fileSpeakerData || null,
+    };
 
-    const { error } = await supabase.from(TABLES.USERS).upsert(
-      {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        avatar: user.avatar,
-        branch: user.branch,
-        year: user.year,
-        education_level: user.educationLevel || '',
-        school_board: user.schoolBoard || '',
-        grade_or_semester: user.gradeOrSemester || '',
-        college_name: user.collegeName || '',
-        study_hours_per_day: user.studyHoursPerDay ?? null,
-        target_year: user.targetYear || '',
-        city: user.city || '',
-        motivation: user.motivation || '',
-        dream: user.dream,
-        current_stage_index: user.currentStageIndex,
-        onboarding_complete: user.onboardingComplete,
-        xp: user.xp,
-        streak: user.streak,
-        rewards: user.rewards ?? [],
-        file_speaker_data: user.fileSpeakerData || null,
-        last_sync: new Date().toISOString(),
-      },
-      { onConflict: 'id' },
-    );
+    const { error: fullError } = await supabase
+      .from(TABLES.USERS)
+      .upsert(fullPayload, { onConflict: 'id' });
 
-    if (error) console.error('Error saving user:', error);
+    if (!fullError) {
+      // Full save worked — also try to persist settings (separate column)
+      if (user.settings) {
+        await supabase.from(TABLES.USERS).update({ settings: user.settings }).eq('id', user.id);
+      }
+      return; // ✅ done
+    }
+
+    // ── Tier 2: Minimal save — only original schema columns (always exists) ──
+    console.warn('[dbService] Full save failed (migration not run?), using minimal save:', fullError.message);
+    const minimalPayload: Record<string, any> = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      avatar: user.avatar,
+      branch: user.branch,
+      year: user.year,
+      dream: user.dream,
+      current_stage_index: user.currentStageIndex,
+      onboarding_complete: user.onboardingComplete,
+      xp: user.xp,
+      streak: user.streak,
+      last_sync: new Date().toISOString(),
+    };
+
+    const { error: minError } = await supabase
+      .from(TABLES.USERS)
+      .upsert(minimalPayload, { onConflict: 'id' });
+
+    if (minError) {
+      console.error('[dbService] saveUser FAILED even with minimal payload:', minError.message, minError);
+      throw new Error(`Failed to save user: ${minError.message}`);
+    }
+    // Minimal save succeeded ✅
   },
 
+
+  // Returns null ONLY when the user truly does not exist in the DB.
+  // Throws if there is a real Supabase error so callers can handle it properly.
   async getUser(userId: string): Promise<UserProfile | null> {
     const { data, error } = await supabase
       .from(TABLES.USERS)
       .select("*")
       .eq("id", userId)
-      .single();
+      .maybeSingle(); // returns null data (no error) when row not found
 
-    if (error || !data) return null;
+    if (error) {
+      console.error('[dbService] getUser error:', error.message, error);
+      throw new Error(`Failed to fetch user: ${error.message}`);
+    }
+    if (!data) return null; // row does not exist yet — truly a new user
 
     return mapRow(data);
   },
@@ -123,6 +169,7 @@ export const dbService = {
     // Clear all local storage keys
     localStorage.removeItem("kalamspark_user_session");
     localStorage.removeItem("kalamspark_roadmap_data");
+    localStorage.removeItem("kalamspark_manual_email"); // Added for manual zero-auth sessions
     localStorage.removeItem("fs_sources");
     localStorage.removeItem("fs_active_id");
     localStorage.removeItem("fs_states");

@@ -94,7 +94,8 @@ function TaskRevisionTab({ user, onXpGain }: Props) {
     setQuiz(null);
     setQuizLoading(true);
     try {
-      const q = await generateMicroQuiz(rev.taskTitle, [rev.taskTitle]);
+      // Use career dream as main context, with the specific task as the focus
+      const q = await generateMicroQuiz(user.dream, [rev.taskTitle]);
       setQuiz(q);
     } catch {
       setQuiz([]);

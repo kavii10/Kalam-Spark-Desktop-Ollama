@@ -181,14 +181,10 @@ async def detect_language(text: str) -> dict:
     """Uses cloud Gemma4 to detect the primary language of the text."""
     try:
         sample = text[:3000]
-        prompt = f"""You are a language detection engine. Analyze the following text and determine its primary language.
-Return ONLY a valid JSON object:
-{{"language_code": "2-letter ISO code (e.g. 'en', 'ta', 'hi')", "language_name": "English name of the language"}}
-
-Text:
-{sample}"""
-
-        response = await _call_llm(prompt, max_tokens=50, temperature=0.0, json_mode=True)
+        system_prompt = "You are a professional language detection engine."
+        user_prompt = f"Analyze the following text and determine its primary language.\nReturn ONLY a valid JSON object: {{\"language_code\": \"ISO\", \"language_name\": \"Name\"}}\n\nText:\n{sample}"
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        response = await _call_llm_chat(messages, max_tokens=50, temperature=0.0, json_mode=True)
         clean_res = response.strip()
         if "```" in clean_res:
             clean_res = clean_res.split("```")[1].split("```")[0].strip()
@@ -435,21 +431,20 @@ async def chat_with_source(source_ids: list[str], source_titles: list[str], hist
     context = retrieve_context(source_ids, question)
 
     if not context:
-        context_note = "(Document context unavailable — answering from general knowledge.)"
+        context_note = "No document context available. Answer from general knowledge and say so."
     else:
         titles_str = ", ".join(source_titles)
-        context_note = f"DOCUMENT CONTEXT (from: {titles_str}):\n{context}"
+        context_note = f"SOURCE DOCUMENTS (from: {titles_str}):\n\n{context}"
 
-    system_prompt = f"""You are a knowledgeable AI assistant helping a student understand their documents.
-Always answer using the provided document context first. If the answer is not in the context, say so clearly.
-Keep answers focused, concise, and educational.
-**CRITICAL**: When using information from the context, you MUST cite your source accurately at the end of the sentence.
-If you see a [Page X] or a [Source: URL] marker in the context, strictly use exactly that format to cite it, e.g., "The mechanism works via X [Page 4]." or "Cloud tech is growing [Source: https://xyz.com/docs]."
-
-{context_note}"""
+    system_prompt = (
+        "You are a helpful AI tutor. A student has uploaded documents and is asking questions about them. "
+        "Answer ONLY from the provided source documents. If the answer is not there, say so clearly. "
+        "Be concise and cite page numbers like [Page 3] when you use content from a specific page."
+        f"\n\n{context_note}"
+    )
 
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in history[-8:]:  # keep last 8 turns
+    for msg in history[-8:]:
         role = "assistant" if msg.get("role") == "ai" else "user"
         messages.append({"role": role, "content": msg.get("text", "")})
     messages.append({"role": "user", "content": question})
@@ -505,22 +500,24 @@ async def run_transformation(source_text: str, transformation_type: str) -> str:
     # Use only first 12000 chars of text for transform to avoid token overflow
     truncated_text = source_text[:12000]
 
-    # BUG FIX 1: prompt_instruction was duplicated (appeared at top AND bottom of prompt).
-    # Removed the redundant top mention — only the instruction at the end is needed.
-    prompt = f"""You are a knowledgeable AI assistant helping a student understand their documents.
-Always answer using the provided document context first. If the answer is not in the context, say so clearly.
-Keep answers focused, concise, and educational.
-**CRITICAL**: When using information from the context, you MUST cite your source accurately at the end of the sentence.
-If you see a [Page X] or a [Source: URL] marker in the context, strictly use exactly that format to cite it.
+    # Use system+user split so the model doesn't echo the instruction constraints
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an AI study assistant. You will receive a document and a task. "
+                "Complete the task using ONLY information from the document. "
+                "Cite page numbers like [Page 3] when referencing specific content. "
+                "Output ONLY the requested result — no preamble, no meta-commentary, no repeating the task."
+            )
+        },
+        {
+            "role": "user",
+            "content": f"DOCUMENT:\n---\n{truncated_text}\n---\n\nTASK: {prompt_instruction}"
+        }
+    ]
 
-DOCUMENT:
----
-{truncated_text}
----
-
-{prompt_instruction}"""
-
-    return await _call_llm(prompt, max_tokens=1500, temperature=0.2)
+    return await _call_llm_chat(messages, max_tokens=1500, temperature=0.2)
 
 
 # ─────────────────────────────────────────────────────────
@@ -529,21 +526,11 @@ DOCUMENT:
 async def detect_document_language(source_text: str) -> str:
     """Detect the primary language of the source document using Gemma4. Returns lang code."""
     sample = source_text[:2000]
-    prompt = f"""Detect the primary language of this text. Respond with ONLY the 2-letter language code from this list:
-en, ta, hi, te, kn, ml, bn, mr
-
-If the text is in multiple languages, pick the most dominant one.
-If you are not sure or the text is in an unsupported language, respond with: en
-
-TEXT SAMPLE:
----
-{sample}
----
-
-Respond with ONLY the 2-letter code (e.g., "ta" or "hi" or "en"). Nothing else."""
-
     try:
-        result = await _call_llm(prompt, max_tokens=5, temperature=0.0)
+        system_prompt = "You are a language detection engine. Respond with ONLY a 2-letter ISO code."
+        user_prompt = f"Detect the primary language of this text. Respond with ONLY the 2-letter code from: en, ta, hi, te, kn, ml, bn, mr.\n\nTEXT SAMPLE:\n{sample}"
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+        result = await _call_llm_chat(messages, max_tokens=5, temperature=0.0)
         code = result.strip().lower()[:2]
         if code in LANGUAGE_VOICES:
             return code
@@ -578,34 +565,29 @@ Example format:
     else:
         language_instruction = ""
 
-    prompt = f"""You are a world-class educational podcast writer. 
+    system_content = (
+        f"You are a world-class educational podcast scriptwriter. "
+        f"You write engaging, conversational dialogue between two hosts: {host1_name} (the expert) and {host2_name} (the curious learner). "
+        f"You write ONLY in {lang_name}. "
+        f"Every fact must come strictly from the source document provided by the user. "
+        f"Output ONLY the script in '{host1_name}: ...' / '{host2_name}: ...' dialogue format — "
+        f"no titles, no headers, no stage directions, no commentary outside the dialogue."
+    )
+    if language_instruction:
+        system_content += f"\n\n{language_instruction}"
 
-### CONTEXT:
-The user wants an engaging conversational podcast based ONLY on the provided source material. 
+    user_content = (
+        f"SOURCE DOCUMENT:\n---\n{truncated_text}\n---\n\n"
+        f"Write a {tone} podcast script about '{topic}' with exactly {min_exchanges} dialogue exchanges. "
+        f"Start immediately with '{host1_name}:' — do not add any intro text."
+    )
 
-### SOURCE MATERIAL:
----
-{truncated_text}
----
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user",   "content": user_content}
+    ]
 
-### PODCAST SPECIFICATIONS:
-- **Topic Reference**: {topic} (Use this ONLY as a title/theme. DO NOT use it as a source of information.)
-- **Tone**: {tone}
-- **Hosts**: {host1_name} (expert) and {host2_name} (learner)
-- **Language**: {lang_name} ({language})
-{language_instruction}
-
-### STRICT CONSTRAINTS:
-1. **SOURCE EXCLUSIVITY**: Every fact, concept, and piece of information MUST be derived STRICTLY from the SOURCE MATERIAL above. 
-2. **NO EXTERNAL KNOWLEDGE**: Do NOT include facts, dates, names, or generic information NOT found in the source. 
-3. **TOPIC LIMITATION**: If the TOPIC title provided contains information NOT in the source, ignore that part of the topic.
-4. **DIALOGUE ONLY**: Write the script in a "{host1_name}: text" format.
-5. **LENGTH**: Write exactly {min_exchanges} exchanges.
-6. **NO ENGLISH**: Ensure the entire output is in {lang_name} script (except if the source uses specific English technical terms that have no translation).
-
-Write the script now:"""
-
-    return await _call_llm(prompt, max_tokens=3000, temperature=0.6)
+    return await _call_llm_chat(messages, max_tokens=3000, temperature=0.6)
 
 
 def _parse_script_lines(script: str, host1: str, host2: str) -> list[dict]:
@@ -820,21 +802,10 @@ async def generate_podcast_interact(
     else:
         language_instruction = ""
 
-    prompt = f"""You are {host_name}, a friendly podcast host speaking in {lang_name}.
-A listener just paused the podcast and asked a question.
-{language_instruction}
-
-CURRENT PODCAST SCRIPT REVEALED SO FAR:
----
-{podcast_script[-3000:]}
----
-
-LISTENER'S QUESTION: "{question}"
-
-Answer extremely briefly, in 1-3 sentences in {lang_name}. Sound natural and conversational, as if you are pausing the show to answer someone directly.
-IMPORTANT: Provide ONLY the dialogue text. Do NOT include your name ({host_name}:) or any quotes at the beginning. Just the words you want to speak."""
-
-    ans_text = await _call_llm(prompt, max_tokens=300, temperature=0.5)
+    system_prompt = f"You are {host_name}, a friendly podcast host speaking in {lang_name}. {language_instruction}"
+    user_prompt = f"A listener just paused the podcast and asked a question.\n\nSCRIPT CONTEXT:\n{podcast_script[-2000:]}\n\nQUESTION: \"{question}\"\n\nAnswer briefly (1-3 sentences) in {lang_name}. Provide ONLY dialogue text. Do NOT include your name or quotes."
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+    ans_text = await _call_llm_chat(messages, max_tokens=300, temperature=0.5)
     print(f"[FileSpeaker] Raw interact LLM response: {repr(ans_text)}")
 
     import re

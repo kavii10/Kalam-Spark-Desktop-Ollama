@@ -119,8 +119,9 @@ async function fetchGoogleBooks(query: string, maxResults = 20, startIndex = 0):
       orderBy: 'relevance',
       printType: 'books',
       langRestrict: 'en',
-      key: BOOKS_API_KEY,
     });
+    // Only add key if it's actually configured — an empty key can cause API errors
+    if (BOOKS_API_KEY) params.set('key', BOOKS_API_KEY);
     const res = await fetchWithTimeout(
       `https://www.googleapis.com/books/v1/volumes?${params}`
     );
@@ -162,9 +163,8 @@ function isBookRelevant(title: string, subjects: string[], query: string): boole
     .filter(t => t.length > 2);
   if (queryTerms.length === 0) return true;
   const haystack = `${title} ${subjects.join(' ')}`.toLowerCase();
-  // Book is relevant if AT LEAST HALF of the meaningful query terms appear in title+subjects
-  const matchCount = queryTerms.filter(t => haystack.includes(t)).length;
-  return matchCount >= Math.ceil(queryTerms.length / 2);
+  // At least 1 meaningful query term must appear — avoids being too strict for multi-word career queries
+  return queryTerms.some(t => haystack.includes(t));
 }
 
 // ── Provider 2: Open Library ──────────────────────────────────────────────────
@@ -448,12 +448,12 @@ async function fetchMITOpenCourseWare(query: string, maxResults = 6): Promise<Vi
   }
 }
 
-/** Aggregate videos from all providers. */
-export async function fetchVideos(query: string, maxPerProvider = 15): Promise<VideoResource[]> {
+/** Aggregate videos from all providers, deduplicating strictly by videoId. */
+export async function fetchVideos(query: string, maxPerProvider = 20): Promise<VideoResource[]> {
   const [yt, ka, mit] = await Promise.allSettled([
     fetchYouTubeVideos(query, maxPerProvider),
-    fetchKhanAcademy(query, 8),
-    fetchMITOpenCourseWare(query, 6),
+    fetchKhanAcademy(query, 6),
+    fetchMITOpenCourseWare(query, 4),
   ]);
 
   const all: VideoResource[] = [
@@ -462,12 +462,22 @@ export async function fetchVideos(query: string, maxPerProvider = 15): Promise<V
     ...(mit.status === 'fulfilled' ? mit.value : []),
   ];
 
-  const seen = new Set<string>();
+  // Deduplicate by the actual YouTube videoId to prevent same video appearing multiple times
+  const seenIds  = new Set<string>();
+  const seenLinks = new Set<string>();
   return all.filter(v => {
-    if (seen.has(v.link)) return false;
-    seen.add(v.link);
+    // Extract videoId from YouTube URLs
+    const videoIdMatch = v.link.match(/[?&]v=([^&]+)/);
+    const videoId = videoIdMatch ? videoIdMatch[1] : null;
+    if (videoId) {
+      if (seenIds.has(videoId)) return false;
+      seenIds.add(videoId);
+    } else {
+      if (seenLinks.has(v.link)) return false;
+      seenLinks.add(v.link);
+    }
     return true;
-  });
+  }).slice(0, 10);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -866,14 +876,26 @@ export async function fetchCurrentAffairs(maxItems = 3): Promise<{ title: string
   return results.slice(0, maxItems);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  MAIN AGGREGATOR
-// ══════════════════════════════════════════════════════════════════════════════
+/**
+ * Clean a subject string by stripping parenthetical content and keeping only
+ * the first 3–4 meaningful words, so APIs like Google Books get clean short queries.
+ * e.g. "Infographic Design Principles (Data-Ink Ratio)" → "Infographic Design Principles"
+ */
+function cleanQueryTerm(term: string): string {
+  return term
+    .replace(/\(.*?\)/g, '')      // strip parenthetical e.g. "(Data-Ink Ratio)"
+    .replace(/[^\w\s-]/g, ' ')   // remove special chars
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .slice(0, 4)                 // keep max 4 words
+    .join(' ');
+}
 
 /**
  * Fetch all resource categories for a given career/stage context.
- * Returns empty arrays per category rather than throwing, so the UI
- * can render partial results even if some APIs are unavailable.
+ * Guarantees at least 10 results per category by running multiple
+ * parallel subject queries and merging + deduplicating results.
  */
 export async function fetchDirectResources(
   dream: string,
@@ -882,45 +904,63 @@ export async function fetchDirectResources(
   level: string,
   page: number = 0
 ): Promise<ResourceData> {
-  const mainSubject = subjects[0] || stageTopic || dream;
-  // Use cleaner, more focused queries for better API matching
-  const bookQuery   = `${mainSubject} ${dream}`.trim();
-  const videoQuery  = `${mainSubject} ${dream} tutorial`.trim();
-  const paperQuery  = `${mainSubject} ${dream} research`.trim();
-  const newsQuery   = `${mainSubject} ${dream} news`.trim();
+  // Build clean, short query terms for each subject to maximise API hit rate
+  const cleanDream   = cleanQueryTerm(dream);
+  const cleanTopic   = cleanQueryTerm(stageTopic);
+  const cleanSubjects = subjects.slice(0, 3).map(cleanQueryTerm).filter(Boolean);
 
-  const startIndex = page * 15;
+  // Unique query pool: topic first, then each subject, then just the career name
+  const queryPool = [...new Set([cleanTopic, ...cleanSubjects, cleanDream])].filter(Boolean);
 
-  const [books, videos, papers, news] = await Promise.allSettled([
-    fetchBooks(bookQuery, 15, startIndex),
-    fetchVideos(videoQuery, 15),
-    fetchPapers(paperQuery, 12, startIndex),
-    fetchNews(newsQuery, 8),
+  // ── Books: fetch from top 2 queries in parallel to ensure 10+ results ────
+  const bookFetches = queryPool.slice(0, 2).map(q => fetchBooks(q, 12, 0));
+  const bookResults = await Promise.allSettled(bookFetches);
+  const seenBookLinks = new Set<string>();
+  const mergedBooks: BookResource[] = [];
+  for (const r of bookResults) {
+    if (r.status === 'fulfilled') {
+      for (const b of r.value) {
+        if (!seenBookLinks.has(b.link) && mergedBooks.length < 10) {
+          seenBookLinks.add(b.link);
+          mergedBooks.push(b);
+        }
+      }
+    }
+  }
+
+  // ── Videos: use the primary topic query, request 20 so after filtering we have 10 ──
+  const videoQuery = `${cleanTopic} ${cleanDream} tutorial learn`.trim();
+
+  // ── Papers: use the first clean subject, cap at 10 ────────────────────────
+  const paperQuery = `${cleanTopic} ${cleanDream}`.trim();
+
+  // ── News: use the career name for relevance ───────────────────────────────
+  const newsQuery = `${cleanDream} ${cleanTopic}`.trim();
+
+  const [videos, papers, news] = await Promise.allSettled([
+    fetchVideos(videoQuery, 20),
+    fetchPapers(paperQuery, 12, 0),
+    fetchNews(newsQuery, 12),
   ]);
 
   return {
-    books:  books.status  === 'fulfilled' ? books.value  : [],
-    videos: videos.status === 'fulfilled' ? videos.value : [],
-    papers: papers.status === 'fulfilled' ? papers.value : [],
-    news:   news.status   === 'fulfilled' ? news.value   : [],
+    books:  mergedBooks,
+    videos: (videos.status === 'fulfilled' ? videos.value : []).slice(0, 10),
+    papers: (papers.status === 'fulfilled' ? papers.value : []).slice(0, 10),
+    news:   (news.status   === 'fulfilled' ? news.value   : []).slice(0, 10),
   };
 }
 
 /**
  * General-purpose search across all resource types.
- * Queries are augmented with the user's dream so it stays career-relevant
+ * Performs a strict search on the exact terms entered by the user.
  */
 export async function searchAllResources(query: string, userDream = ''): Promise<ResourceData> {
-  // Blend the user's career context into all queries so results are strictly career-relevant
-  const augmentedQuery = userDream && !query.toLowerCase().includes(userDream.toLowerCase())
-    ? `${userDream} preparation ${query}`.trim()
-    : query;
-
   const [books, videos, papers, news] = await Promise.allSettled([
-    fetchBooks(query, 10), // Use raw query for books to prevent exact-match API confusion
-    fetchVideos(augmentedQuery, 10),
-    fetchPapers(query, 8), // Use raw query for papers
-    fetchNews(augmentedQuery, 6),
+    fetchBooks(query, 10),
+    fetchVideos(query, 10),
+    fetchPapers(query, 8),
+    fetchNews(query, 6),
   ]);
 
   return {

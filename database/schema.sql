@@ -14,11 +14,22 @@ CREATE TABLE IF NOT EXISTS users (
   avatar               TEXT,
   branch               TEXT,
   year                 TEXT,
+  education_level      TEXT,
+  school_board         TEXT,
+  grade_or_semester    TEXT,
+  college_name         TEXT,
+  study_hours_per_day  INT,
+  target_year          TEXT,
+  city                 TEXT,
+  motivation           TEXT,
   dream                TEXT,
   current_stage_index  INT DEFAULT 0,
   onboarding_complete  BOOLEAN DEFAULT FALSE,
   xp                   INT DEFAULT 0,
   streak               INT DEFAULT 0,
+  rewards              JSONB DEFAULT '[]'::jsonb,
+  settings             JSONB,
+  file_speaker_data    JSONB,
   last_sync            TIMESTAMPTZ,
   created_at           TIMESTAMPTZ DEFAULT NOW()
 );
@@ -36,13 +47,14 @@ CREATE TABLE IF NOT EXISTS roadmaps (
 -- 3. Tasks  (Daily planner tasks)
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tasks (
-  id         TEXT PRIMARY KEY,
-  user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
-  title      TEXT NOT NULL,
-  type       TEXT,
-  completed  BOOLEAN DEFAULT FALSE,
-  date       TIMESTAMPTZ,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT REFERENCES users(id) ON DELETE CASCADE,
+  title          TEXT NOT NULL,
+  type           TEXT,
+  linked_subject TEXT,
+  completed      BOOLEAN DEFAULT FALSE,
+  date           TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- ------------------------------------------------------------

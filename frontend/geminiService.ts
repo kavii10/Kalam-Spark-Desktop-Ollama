@@ -317,31 +317,40 @@ export const generateMicroQuiz = async (
   if (apiKey) {
     try {
       const ai = new GoogleGenAI({ apiKey });
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: `Create a 5-question multiple choice quiz for a student learning about "${subject}". 
-      Stage Context: ${stageDetails?.description || "General learning"}.
-      Concepts: ${(stageDetails?.concepts || []).join(", ") || subject}.
-      Recent tasks: ${tasks.join(", ")}.`,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              question: { type: Type.STRING },
-              options: { type: Type.ARRAY, items: { type: Type.STRING } },
-              correctAnswer: { type: Type.NUMBER },
-              explanation: { type: Type.STRING },
+      const response = await ai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: `You are a Lead Expert in ${subject}. Create a high-quality 10-question multiple choice quiz.
+        
+        CONTEXT:
+        - Career Field: ${subject}
+        - Current Training Focus: ${stageDetails?.description || "General industry standards"}
+        - Concepts to Test: ${(stageDetails?.concepts || []).join(", ") || subject}
+        - Practical Experience: ${tasks.join(", ")}
+        
+        REQUIREMENTS:
+        1. 10 unique, professional-grade questions.
+        2. Scenario-based: Ask how a ${subject} should handle specific situations.
+        3. NO generic questions.
+        4. Include 4 distinct options and a professional explanation for each.`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                question: { type: Type.STRING },
+                options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                correctAnswer: { type: Type.NUMBER },
+                explanation: { type: Type.STRING },
+              },
+              required: ["question", "options", "correctAnswer", "explanation"],
             },
-            required: ["question", "options", "correctAnswer", "explanation"],
           },
         },
-      },
-    });
-    const parsed = JSON.parse(response.text || "[]");
-    if (parsed.length > 0) return parsed;
+      });
+      const parsed = JSON.parse(response.text || "[]");
+      if (parsed.length > 0) return parsed.slice(0, 10);
     } catch (e) {
       console.error("Gemini fallback quiz generation failed:", e);
     }
@@ -383,22 +392,42 @@ export const generateDreamSummary = async (dream: string, branch: string, year: 
   if (apiKey) {
     try {
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `A student wants to become a "${dream}". Their subject interest is "${branch}" and education level is "${year}".
-  
-  Write a HIGHLY SPECIFIC career overview in exactly 3 sentences (plain text, NO markdown, NO bullet points, NO numbering):
-  Sentence 1: What a ${dream} IS specifically (not a generic professional) and their unique role in society.
-  Sentence 2: What they do day-to-day on the job (specific tools, environment, or activities unique to ${dream}).
-  Sentence 3: Their key responsibilities (name 2-3 concrete duties ONLY performed by a ${dream}).
-  
-  STRICT RULE: Do NOT give a generic "skilled professional" description. If the dream is "${dream}", the description MUST be about ${dream}.
-  Be specific, inspiring, and human.`;
+      const prompt = `Write an inspiring career overview for a ${dream} (focusing on ${branch} for a ${year} student).`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.0-flash',
         contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              sentence1: { type: Type.STRING, description: "Exactly what they do (their unique role in society)" },
+              sentence2: { type: Type.STRING, description: "Their specific day-to-day work environment or tools" },
+              sentence3: { type: Type.STRING, description: "Their 2-3 most critical unique responsibilities" }
+            },
+            required: ["sentence1", "sentence2", "sentence3"]
+          }
+        }
       });
-      const text = response.text?.trim();
-      if (text) return text;
+      let text = response.text?.trim();
+      if (text) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.sentence1 && parsed.sentence2 && parsed.sentence3) {
+            let s1 = parsed.sentence1.trim();
+            let s2 = parsed.sentence2.trim();
+            let s3 = parsed.sentence3.trim();
+            if (!s1.match(/[.!?]$/)) s1 += '.';
+            if (!s2.match(/[.!?]$/)) s2 += '.';
+            if (!s3.match(/[.!?]$/)) s3 += '.';
+            return `${s1} ${s2} ${s3}`;
+          }
+        } catch(e) {}
+        
+        text = text.replace(/[\*\-\#]/g, '').replace(/Constraint \d+:/gi, '').replace(/\n+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        return text;
+      }
     } catch (e: any) {
       console.error('generateDreamSummary Gemini failed:', e?.message || e);
     }
